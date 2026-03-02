@@ -58,7 +58,10 @@ public class BloomRenderer
         return framebuffer;
     }
 
-    public void Render(Framebuffer input)
+    /// <summary>
+    /// Renders multi-pass bloom from the resolved scene color into <see cref="AccumulationResult"/>.
+    /// </summary>
+    public void Render(RenderTexture input)
     {
         Debug.Assert(firstDownsampleBloomThreshold != null);
         Debug.Assert(downsample != null);
@@ -103,13 +106,10 @@ public class BloomRenderer
 
         using (new GLDebugGroup("Bloom Downsample Threshold Pass"))
         {
-            var inputTexture = input.Color;
-            Debug.Assert(inputTexture != null && inputTexture.Target == TextureTarget.Texture2D);
+            Debug.Assert(input.Target == TextureTarget.Texture2D);
 
             firstDownsampleBloomThreshold.Use();
-            firstDownsampleBloomThreshold.SetTexture(0, "inputTexture", inputTexture);
-            inputTexture.SetFiltering(TextureMinFilter.Linear, TextureMagFilter.Linear);
-            inputTexture.SetWrapMode(TextureWrapMode.ClampToEdge);
+            firstDownsampleBloomThreshold.SetTexture(0, "inputTexture", input);
 
             Ping.Bind(FramebufferTarget.DrawFramebuffer);
             GL.Viewport(0, 0, Ping.Width, Ping.Height);

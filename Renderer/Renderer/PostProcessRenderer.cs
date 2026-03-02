@@ -9,10 +9,10 @@ namespace ValveResourceFormat.Renderer
     public class PostProcessRenderer
     {
         private readonly RendererContext RendererContext;
-        private Shader? shaderMSAAResolve;
+        private Shader? shaderMsaaResolve;
+        private Shader? shaderDepthResolve;
         private Shader? shaderPostProcess;
         private Shader? shaderPostProcessBloom;
-        private Framebuffer? MsaaResolveFramebuffer;
         private readonly OutlineRenderer Outline;
 
         public RenderTexture? BlueNoise { get; set; }
@@ -44,16 +44,49 @@ namespace ValveResourceFormat.Renderer
 
         public void Load()
         {
-            shaderMSAAResolve = RendererContext.ShaderLoader.LoadShader("vrf.msaa_resolve");
+            shaderMsaaResolve = RendererContext.ShaderLoader.LoadShader("vrf.msaa_resolve");
+            shaderDepthResolve = RendererContext.ShaderLoader.LoadShader("vrf.depth_resolve");
             shaderPostProcess = RendererContext.ShaderLoader.LoadShader("vrf.post_processing", ("D_BLOOM", 0));
             shaderPostProcessBloom = RendererContext.ShaderLoader.LoadShader("vrf.post_processing", ("D_BLOOM", 1));
 
-            MsaaResolveFramebuffer = Framebuffer.Prepare("Multi Sampling Resolve", 2, 2, 0, DefaultColorFormat, null);
-            MsaaResolveFramebuffer.Initialize();
-            MsaaResolveFramebuffer.Color!.SetWrapMode(TextureWrapMode.ClampToEdge);
-
             Bloom.Load();
             Outline.Load();
+        }
+
+        /// <summary>
+        /// Resolves MSAA color and/or depth from source using compute shaders.
+        /// Color and depth are written to standalone RenderTexture targets.
+        /// Uses Karis average for HDR-aware color resolve, min filter for depth (conservative for reverse-Z).
+        /// </summary>
+        public void ResolveMsaa(Framebuffer source, RenderTexture destColor, RenderTexture destDepth,
+            bool resolveColor, bool resolveDepth)
+        {
+            Debug.Assert(shaderMsaaResolve != null && shaderDepthResolve != null);
+
+            var groupsX = (destColor.Width + 7) / 8;
+            var groupsY = (destColor.Height + 7) / 8;
+
+            if (resolveColor)
+            {
+                shaderMsaaResolve.Use();
+                shaderMsaaResolve.SetTexture(0, "g_tSourceMsaa", source.Color);
+                GL.BindImageTexture(1, destColor.Handle, 0, false, 0,
+                    TextureAccess.WriteOnly, SizedInternalFormat.Rgba16f);
+                shaderMsaaResolve.SetUniform1("g_nNumSamplesMSAA", source.NumSamples);
+                GL.DispatchCompute(groupsX, groupsY, 1);
+            }
+
+            if (resolveDepth)
+            {
+                shaderDepthResolve.Use();
+                shaderDepthResolve.SetTexture(0, "g_tSourceDepthMsaa", source.Depth);
+                GL.BindImageTexture(1, destDepth.Handle, 0, false, 0,
+                    TextureAccess.WriteOnly, SizedInternalFormat.R32f);
+                shaderDepthResolve.SetUniform1("g_nNumSamplesMSAA", source.NumSamples);
+                GL.DispatchCompute(groupsX, groupsY, 1);
+            }
+
+            GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.TextureFetchBarrierBit);
         }
 
         private void SetPostProcessUniforms(Shader shader, TonemapSettings TonemapSettings)
@@ -77,33 +110,28 @@ namespace ValveResourceFormat.Renderer
             shader.SetUniform1("g_flWhitePointScale", 1.0f / tonemappedWhitePoint);
         }
 
-        public void Render(Framebuffer colorBufferRead, Framebuffer colorBufferDraw, Camera camera, bool flipY)
+        /// <summary>
+        /// Resolves MSAA, applies DOF/bloom, tonemaps, and writes the final LDR image to <paramref name="colorBufferDraw"/>.
+        /// </summary>
+        public void Render(Framebuffer colorBufferRead, Framebuffer colorBufferDraw,
+            RenderTexture resolveTarget, Camera camera, bool flipY)
         {
-            Debug.Assert(shaderMSAAResolve != null);
+            Debug.Assert(shaderMsaaResolve != null);
             Debug.Assert(shaderPostProcess != null && shaderPostProcessBloom != null);
 
             Debug.Assert(BlueNoise != null);
-            Debug.Assert(MsaaResolveFramebuffer != null);
 
             GL.DepthMask(false);
             GL.Disable(EnableCap.DepthTest);
 
             using (new GLDebugGroup("MSAA Resolve"))
             {
-                var msaaResolveShader = shaderMSAAResolve;
-
-                if (DOF.Enabled)
-                {
-                    msaaResolveShader = DOF.MsaaResolveDof.Value;
-                }
-
-                MsaaResolveFramebuffer.Resize(colorBufferRead.Width, colorBufferRead.Height);
-                MsaaResolveFramebuffer.BindAndClear(FramebufferTarget.DrawFramebuffer);
+                var msaaResolveShader = DOF.Enabled ? DOF.MsaaResolveDof.Value : shaderMsaaResolve;
 
                 msaaResolveShader.Use();
-
                 msaaResolveShader.SetTexture(0, "g_tSourceMsaa", colorBufferRead.Color);
-
+                GL.BindImageTexture(1, resolveTarget.Handle, 0, false, 0,
+                    TextureAccess.WriteOnly, SizedInternalFormat.Rgba16f);
                 msaaResolveShader.SetUniform1("g_bFlipY", flipY);
                 msaaResolveShader.SetUniform1("g_nNumSamplesMSAA", colorBufferRead.NumSamples);
 
@@ -112,15 +140,17 @@ namespace ValveResourceFormat.Renderer
                     DOF.SetDofResolveShaderUniforms(msaaResolveShader, camera, colorBufferRead.Depth!);
                 }
 
-                GL.BindVertexArray(RendererContext.MeshBufferCache.EmptyVAO);
-                GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
+                var groupsX = (resolveTarget.Width + 7) / 8;
+                var groupsY = (resolveTarget.Height + 7) / 8;
+                GL.DispatchCompute(groupsX, groupsY, 1);
+                GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.TextureFetchBarrierBit);
             }
 
-            var resolvedScene = MsaaResolveFramebuffer;
+            RenderTexture resolvedScene = resolveTarget;
 
             if (DOF.Enabled)
             {
-                resolvedScene = DOF.Render(MsaaResolveFramebuffer);
+                resolvedScene = DOF.Render(resolveTarget);
             }
 
             using (new GLDebugGroup("Tonemapping, Color Correction, Bloom"))
@@ -138,7 +168,7 @@ namespace ValveResourceFormat.Renderer
                 postProcessShader.Use();
                 GL.Viewport(0, 0, colorBufferRead.Width, colorBufferRead.Height);
 
-                postProcessShader.SetTexture(0, "g_tColorBuffer", resolvedScene.Color);
+                postProcessShader.SetTexture(0, "g_tColorBuffer", resolvedScene);
                 postProcessShader.SetTexture(1, "g_tColorCorrectionLUT", State.ColorCorrectionLUT ?? RendererContext.MaterialLoader.GetErrorTexture()); // todo: error postprocess texture
                 postProcessShader.SetTexture(2, "g_tBlueNoise", BlueNoise);
 

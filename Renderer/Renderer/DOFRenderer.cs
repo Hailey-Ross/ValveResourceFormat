@@ -51,7 +51,10 @@ public class DOFRenderer
         RendererContext = rendererContext;
     }
 
-    public Framebuffer Render(Framebuffer input)
+    /// <summary>
+    /// Applies depth-of-field blur. Returns the blurred color texture.
+    /// </summary>
+    public RenderTexture Render(RenderTexture input)
     {
         if (DOF == null)
         {
@@ -72,18 +75,18 @@ public class DOFRenderer
 
             SetShaderParams();
 
-            DOF.SetTexture(0, "g_tInputColor_CoC", input.Color);
+            DOF.SetTexture(0, "g_tInputColor_CoC", input);
 
             GL.BindVertexArray(RendererContext.MeshBufferCache.EmptyVAO);
             GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
         }
 
-        return BlurredResult;
+        return BlurredResult.Color!;
     }
 
     public void SetDofResolveShaderUniforms(Shader shader, Camera camera, RenderTexture msaaDepth)
     {
-        shader.SetTexture(1, "g_tSceneDepth", msaaDepth);
+        shader.SetTexture(2, "g_tSceneDepth", msaaDepth);
 
         Matrix4x4.Invert(camera.ViewProjectionMatrix, out var invViewProjMatrix);
         shader.SetUniform4x4("g_invViewProjMatrix", invViewProjMatrix);

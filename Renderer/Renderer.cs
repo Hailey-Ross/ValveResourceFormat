@@ -29,7 +29,17 @@ public class Renderer
 
     private readonly Shader[] depthOnlyShaders = new Shader[Enum.GetValues<DepthOnlyProgram>().Length];
     public Framebuffer? ShadowDepthBuffer { get; private set; }
-    public Framebuffer? FramebufferCopy { get; private set; }
+    /// <summary>
+    /// Resolved (non-MSAA) scene color in rgba16f format, used for refraction, bloom input, and luminance computation.
+    /// Filled by <see cref="GrabFramebufferCopy"/>.
+    /// </summary>
+    public RenderTexture? ResolvedSceneColor { get; private set; }
+
+    /// <summary>
+    /// Resolved (non-MSAA) scene depth in R32F format, used for the depth pyramid and occlusion culling.
+    /// Filled by <see cref="GrabFramebufferCopy"/>.
+    /// </summary>
+    public RenderTexture? ResolvedSceneDepth { get; private set; }
 
     private readonly Shader[] histogramShaders = new Shader[2];
     private readonly StorageBuffer[] histogramBuffers = new StorageBuffer[2];
@@ -84,17 +94,14 @@ public class Renderer
         histogramBuffers[0] = StorageBuffer.Allocate<uint>(ReservedBufferSlots.Histogram, 256, BufferUsageHint.DynamicDraw);
         histogramBuffers[1] = StorageBuffer.Allocate<uint>(ReservedBufferSlots.AverageLuminance, 4, BufferUsageHint.DynamicRead);
 
-        FramebufferCopy = Framebuffer.Prepare(nameof(FramebufferCopy), 4, 4, 0,
-            new Framebuffer.AttachmentFormat(PixelInternalFormat.R11fG11fB10f, PixelFormat.Rgb, PixelType.HalfFloat),
-            new Framebuffer.DepthAttachmentFormat(PixelInternalFormat.DepthComponent32f, PixelType.Float)
-        );
+        ResolvedSceneColor = RenderTexture.Create(4, 4, SizedInternalFormat.Rgba16f);
+        ResolvedSceneColor.SetFiltering(TextureMinFilter.Linear, TextureMagFilter.Linear);
+        ResolvedSceneColor.SetWrapMode(TextureWrapMode.ClampToEdge);
 
-        FramebufferCopy.Initialize();
-        FramebufferCopy.ClearColor = new(0, 0, 0, 255);
-        Debug.Assert(FramebufferCopy.Color != null && FramebufferCopy.Depth != null);
+        ResolvedSceneDepth = RenderTexture.Create(4, 4, SizedInternalFormat.R32f);
 
-        Textures.Add(new(ReservedTextureSlots.SceneColor, "g_tSceneColor", FramebufferCopy.Color));
-        Textures.Add(new(ReservedTextureSlots.SceneDepth, "g_tSceneDepth", FramebufferCopy.Depth));
+        Textures.Add(new(ReservedTextureSlots.SceneColor, "g_tSceneColor", ResolvedSceneColor));
+        Textures.Add(new(ReservedTextureSlots.SceneDepth, "g_tSceneDepth", ResolvedSceneDepth));
         // Textures.Add(new(ReservedTextureSlots.SceneStencil, "g_tSceneStencil", FramebufferCopy.Stencil));
 
         EnsureDepthPyramidSize(256, 256);
@@ -375,9 +382,9 @@ public class Renderer
 
                 if (generateDepthPyramid)
                 {
-                    Debug.Assert(FramebufferCopy != null && FramebufferCopy.Depth != null);
+                    Debug.Assert(ResolvedSceneColor != null && ResolvedSceneDepth != null);
                     EnsureDepthPyramidSize(renderContext.Framebuffer.Width, renderContext.Framebuffer.Height);
-                    Scene.GenerateDepthPyramid(FramebufferCopy.Depth);
+                    Scene.GenerateDepthPyramid(ResolvedSceneDepth);
                     Scene.DepthPyramidViewProjection = Camera.ViewProjectionMatrix;
                     Scene.DepthPyramidValid = true;
                 }
@@ -451,12 +458,12 @@ public class Renderer
 
     private void ComputeAverageLuminance(Scene.RenderContext renderContext)
     {
-        Debug.Assert(FramebufferCopy != null);
+        Debug.Assert(ResolvedSceneColor != null);
 
         using var _ = new GLDebugGroup("Compute Average Luminance");
 
-        var width = FramebufferCopy.Width;
-        var height = FramebufferCopy.Height;
+        var width = ResolvedSceneColor.Width;
+        var height = ResolvedSceneColor.Height;
 
         static void Dispatch(Shader shader, RenderTexture texture, int x, int y)
         {
@@ -477,8 +484,7 @@ public class Renderer
         histogramBuffers[0].BindBufferBase();
         histogramBuffers[1].BindBufferBase();
 
-        var inputTex = FramebufferCopy.Color;
-        Debug.Assert(inputTex != null);
+        var inputTex = ResolvedSceneColor;
 
         // Build histogram
         var groupsX = Math.Max(1, (width + 15) / 16);
@@ -518,6 +524,22 @@ public class Renderer
         GL.DepthMask(true);
     }
 
+    private void EnsureResolvedTextureSize(int width, int height)
+    {
+        if (ResolvedSceneColor!.Width != width ||
+            ResolvedSceneColor.Height != height)
+        {
+            // TODO: Textures list holds stale references after recreating these textures
+            ResolvedSceneColor.Delete();
+            ResolvedSceneColor = RenderTexture.Create(width, height, SizedInternalFormat.Rgba16f);
+            ResolvedSceneColor.SetFiltering(TextureMinFilter.Linear, TextureMagFilter.Linear);
+            ResolvedSceneColor.SetWrapMode(TextureWrapMode.ClampToEdge);
+
+            ResolvedSceneDepth!.Delete();
+            ResolvedSceneDepth = RenderTexture.Create(width, height, SizedInternalFormat.R32f);
+        }
+    }
+
     public void GrabFramebufferCopy(Framebuffer framebuffer, bool copyColor, bool copyDepth)
     {
         if (!copyColor && !copyDepth)
@@ -527,26 +549,9 @@ public class Renderer
 
         using var _ = new GLDebugGroup("Framebuffer Copy");
 
-        if (FramebufferCopy is null)
-        {
-            throw new InvalidOperationException("Initialize() must be called before rendering");
-        }
+        EnsureResolvedTextureSize(framebuffer.Width, framebuffer.Height);
 
-        if (FramebufferCopy.Width != framebuffer.Width ||
-            FramebufferCopy.Height != framebuffer.Height)
-        {
-            FramebufferCopy.Resize(framebuffer.Width, framebuffer.Height);
-        }
-
-        FramebufferCopy.BindAndClear(FramebufferTarget.DrawFramebuffer);
-
-        var flags = ClearBufferMask.None;
-        flags |= copyColor ? ClearBufferMask.ColorBufferBit : 0;
-        flags |= copyDepth ? ClearBufferMask.DepthBufferBit : 0;
-
-        GL.BlitNamedFramebuffer(framebuffer.FboHandle, FramebufferCopy.FboHandle,
-            0, 0, framebuffer.Width, framebuffer.Height,
-            0, 0, FramebufferCopy.Width, FramebufferCopy.Height, flags, BlitFramebufferFilter.Nearest);
+        Postprocess.ResolveMsaa(framebuffer, ResolvedSceneColor!, ResolvedSceneDepth!, copyColor, copyDepth);
 
         framebuffer.Bind(FramebufferTarget.Framebuffer);
     }
@@ -564,7 +569,9 @@ public class Renderer
         Debug.Assert(inputFramebuffer.NumSamples > 0);
         Debug.Assert(outputFramebuffer.NumSamples == 0);
 
-        Postprocess.Render(inputFramebuffer, outputFramebuffer, Camera, flipY);
+        EnsureResolvedTextureSize(inputFramebuffer.Width, inputFramebuffer.Height);
+
+        Postprocess.Render(inputFramebuffer, outputFramebuffer, ResolvedSceneColor!, Camera, flipY);
     }
 
     public void Dispose()
@@ -573,6 +580,8 @@ public class Renderer
         Scene?.Dispose();
         SkyboxScene?.Dispose();
         Timings?.Dispose();
+        ResolvedSceneColor?.Delete();
+        ResolvedSceneDepth?.Delete();
     }
 
     public void Update(Scene.UpdateContext updateContext)
