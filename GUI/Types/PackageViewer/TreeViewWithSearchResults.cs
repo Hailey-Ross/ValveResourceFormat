@@ -310,14 +310,18 @@ namespace GUI.Types.PackageViewer
                 UpdateSearchTextBoxToCurrentPath(pkgNode);
             }
 
+            AssignIcons();
+        }
+
+        private void AssignIcons()
+        {
             if (mainListView.View == View.LargeIcon)
             {
                 AssignBigIconIndicesAndRenderThumbnails();
+                return;
             }
-            else
-            {
-                AssignSmallIconIndices();
-            }
+
+            AssignSmallIconIndices();
         }
 
         private readonly Dictionary<string, ThumbnailRenderer> ThumbnailRenderers = new()
@@ -1074,7 +1078,7 @@ namespace GUI.Types.PackageViewer
             DisplayMainListView();
             mainListView.EndUpdate();
 
-            AssignBigIconIndicesAndRenderThumbnails();
+            AssignIcons();
         }
 
         private void MainListView_ColumnClick(object? sender, ColumnClickEventArgs e)
@@ -1319,6 +1323,7 @@ namespace GUI.Types.PackageViewer
         public void ReplaceListViewWithControl(TabPage tab)
         {
             mainListView.Visible = false;
+            SetGridModeToolbarVisible(false);
 
             var tabs = new ThemedTabControl
             {
@@ -1348,6 +1353,12 @@ namespace GUI.Types.PackageViewer
             }
         }
 
+        private void SetGridModeToolbarVisible(bool visible)
+        {
+            tableLayoutPanel2.Visible = visible;
+            tableLayoutPanel1.RowStyles[0].Height = visible ? 40F : 0F;
+        }
+
         private void DisplayMainListView()
         {
             if (mainListView.Parent == null)
@@ -1363,6 +1374,7 @@ namespace GUI.Types.PackageViewer
                 }
             }
 
+            SetGridModeToolbarVisible(true);
             mainListView.Visible = true;
         }
 
@@ -1612,7 +1624,7 @@ namespace GUI.Types.PackageViewer
                 mainListView.View = View.Details;
                 mainListView.SmallImageList = MainForm.ImageList;
 
-                AssignSmallIconIndices();
+                AssignIcons();
 
                 mainListView.AdjustColumnWidths();
                 mainListView.Invalidate();
@@ -1660,8 +1672,7 @@ namespace GUI.Types.PackageViewer
                 ThumbnailRenderTokenSource = new CancellationTokenSource();
 
                 mainListView.View = View.LargeIcon;
-
-                AssignBigIconIndicesAndRenderThumbnails();
+                AssignIcons();
             }
         }
 
@@ -1683,7 +1694,7 @@ namespace GUI.Types.PackageViewer
             mainListView.LargeImageList = BigIconsImageList;
             oldBigIconsImageList.Dispose();
 
-            AssignBigIconIndicesAndRenderThumbnails();
+            AssignIcons();
         }
     }
 }
